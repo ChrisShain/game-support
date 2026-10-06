@@ -11,6 +11,7 @@ Support and privacy information for iOS games by Chris Shain.
 - **Ricochet Run: Brick Bounce** — aim once, watch it ricochet. Brick-breaker with perks.
 - **Bloom: Steer the Garden** — a garden that grows on its own; you steer it.
 - **Bumper Crop Farm Stand** — stack and merge produce at the farm stand.
+- **Capsule Corner** — crank the capsule machine, collect and care for the pets inside.
 
 ## Need help or found a bug?
 

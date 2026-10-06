@@ -4,10 +4,10 @@ title: Privacy Policy
 
 # Privacy Policy
 
-_Last updated: September 24, 2026_
+_Last updated: October 6, 2026_
 
 This policy covers all iOS games published by Chris Shain, including **Ricochet Run: Brick
-Bounce**, **Bloom: Steer the Garden**, and **Bumper Crop Farm Stand**.
+Bounce**, **Bloom: Steer the Garden**, **Bumper Crop Farm Stand**, and **Capsule Corner**.
 
 ## Summary
 
@@ -16,12 +16,12 @@ games stay on your device.
 
 **Ricochet Run** shows ads, which are served by Google AdMob, and Google collects data
 through those ads. That is the only data collection in any of these games, and it is
-described in full below. Bloom and Bumper Crop show no ads and collect nothing at all.
+described in full below. Bloom, Bumper Crop and Capsule Corner show no ads and collect nothing at all.
 
 ## What the games themselves collect
 
 Nothing. There are no accounts, no sign-in and no analytics of our own. Scores, run history,
-settings and any palettes you make are written to the app's own storage on your device and
+settings, pets, gardens and any palettes you make are written to the app's own storage on your device and
 are never sent anywhere. Deleting the app deletes them.
 
 ## Advertising, in Ricochet Run only
