@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="ad.size" content="width=0,height=0">
+<title>Ricochet Run</title>
+<!-- Browser version of the playable ad: the install button opens the App Store page. -->
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #F4ECDC; overflow: hidden;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: none; }
+  canvas { display: block; position: absolute; left: 0; top: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+'use strict';
+// --- constants, mirroring the game's paper look and its 390x844 canvas ---
+var STORE_URL = 'https://apps.apple.com/us/app/ricochet-run-brick-bounce/id6814211779';
+var W = 390, H = 844;
+var CREAM = '#F4ECDC', CARD = '#E9DFC8', INK = '#2A2420', RED = '#E0523F', BLUE = '#2A6F97', YELLOW = '#F2B134', WHITE = '#FFFDF7';
+var SHADOW = 'rgba(51,38,25,0.22)';
+var BRICK_COLORS = ['#F2B134', '#2A6F97', '#E0523F'];   // the Paper set: orange, blue, red
+var COLS = 10, ROWS = 11;
+var BOARD_L = 20, BOARD_R = W - 20, BOARD_T = 120, CELL = (BOARD_R - BOARD_L) / COLS;
+var FLOOR_Y = BOARD_T + ROWS * CELL + 18;
+var BALL_R = 6, BALL_SPEED = 900, FIRE_GAP = 0.08, SUBSTEP = 4;
+var MIN_ELEV = 12 * Math.PI / 180;
+var TURNS_IN_AD = 4;   // turns of play before the install card
+
+var canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+var scale = 1, offX = 0, offY = 0;
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var vw = window.innerWidth, vh = window.innerHeight;
+  scale = Math.min(vw / W, vh / H);
+  offX = (vw - W * scale) / 2; offY = (vh - H * scale) / 2;
+  canvas.width = vw * dpr; canvas.height = vh * dpr;
+  canvas.style.width = vw + 'px'; canvas.style.height = vh + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize); resize();
+
+// --- deterministic little RNG so the ad plays the same for everyone ---
+var seed = 4242;
+function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+
+// --- state ---
+var bricks = {};        // key "c,r" -> {c, r, hp, color, flash, tilt}
+var pickups = {};       // key -> true (extra-ball stars)
+var balls = [];
+var turn = 1, ballCount = 1, toFire = 0, fireClock = 0, fireDir = null;
+var phase = 'aim';      // aim | firing | descend | end
+var launcherX = W / 2, firstReturnX = null, returned = 0;
+var score = 0, aiming = false, aimPt = null, popups = [], t = 0, descendT = 0;
+var combo = 0, streak = 0, pulse = 0;
+
+function key(c, r) { return c + ',' + r; }
+function cellCenter(c, r) { return { x: BOARD_L + (c + 0.5) * CELL, y: BOARD_T + (r + 0.5) * CELL }; }
+function spawnRow() {
+  var n = 3 + Math.floor(rnd() * 3), used = {}, placed = 0, emptiest = -1;
+  while (placed < n) {
+    var c = Math.floor(rnd() * COLS);
+    if (used[c]) continue;
+    used[c] = true; placed++;
+    var hp = Math.max(1, Math.round(turn * (0.6 + rnd() * 0.7)));
+    bricks[key(c, 0)] = { c: c, r: 0, hp: hp, color: BRICK_COLORS[Math.floor(rnd() * 3)], flash: 0, tilt: 0 };
+  }
+  if (rnd() < 0.85) {
+    for (var cc = 0; cc < COLS; cc++) if (!used[cc]) { emptiest = cc; break; }
+    if (emptiest >= 0) pickups[key(emptiest, 0)] = true;
+  }
+}
+function shiftRows() {
+  var nb = {}, np = {}, k;
+  for (k in bricks) { var b = bricks[k]; b.r++; nb[key(b.c, b.r)] = b; }
+  for (k in pickups) { var p = k.split(','); np[key(+p[0], +p[1] + 1)] = true; }
+  bricks = nb; pickups = np;
+}
+function startRun() {
+  bricks = {}; pickups = {}; balls = []; turn = 1; ballCount = 3; score = 0; popups = [];
+  for (var i = 0; i < 3; i++) { spawnRow(); shiftRows(); turn++; }
+  turn = 1; phase = 'aim';
+}
+
+// --- physics ---
+function fire(dir) {
+  fireDir = dir; toFire = ballCount; fireClock = 0; returned = 0; firstReturnX = null; combo = 0;
+  phase = 'firing';
+}
+function brickHit(ball) {
+  // nearest brick overlapping the ball; returns {b, nx, ny, cx, cy}
+  var best = null, bestD = 1e9;
+  var c0 = Math.floor((ball.x - BALL_R - BOARD_L) / CELL), c1 = Math.floor((ball.x + BALL_R - BOARD_L) / CELL);
+  var r0 = Math.floor((ball.y - BALL_R - BOARD_T) / CELL), r1 = Math.floor((ball.y + BALL_R - BOARD_T) / CELL);
+  for (var c = c0; c <= c1; c++) for (var r = r0; r <= r1; r++) {
+    var b = bricks[key(c, r)]; if (!b) continue;
+    var cen = cellCenter(c, r), half = CELL / 2 - 2;
+    var cx = Math.max(cen.x - half, Math.min(ball.x, cen.x + half));
+    var cy = Math.max(cen.y - half, Math.min(ball.y, cen.y + half));
+    var dx = ball.x - cx, dy = ball.y - cy, d = dx * dx + dy * dy;
+    if (d < BALL_R * BALL_R && d < bestD) { bestD = d; best = { b: b, cx: cx, cy: cy, half: half, cen: cen }; }
+  }
+  if (!best) return null;
+  // normal: the face behind the ball's motion, by shallowest penetration
+  var b2 = best.b, cen2 = best.cen, h = best.half;
+  var pens = [
+    { nx: -1, ny: 0, p: (ball.x + BALL_R) - (cen2.x - h) },
+    { nx: 1, ny: 0, p: (cen2.x + h) - (ball.x - BALL_R) },
+    { nx: 0, ny: -1, p: (ball.y + BALL_R) - (cen2.y - h) },
+    { nx: 0, ny: 1, p: (cen2.y + h) - (ball.y - BALL_R) }];
+  var pick = null;
+  for (var i = 0; i < 4; i++) {
+    var f = pens[i];
+    if (ball.vx * f.nx + ball.vy * f.ny < 0 && (!pick || f.p < pick.p)) pick = f;
+  }
+  if (!pick) { pick = pens[0]; for (var j = 1; j < 4; j++) if (pens[j].p < pick.p) pick = pens[j]; }
+  return { b: b2, nx: pick.nx, ny: pick.ny, cen: cen2, half: h, pen: pick.p };
+}
+function minElev(ball) {
+  var sp = Math.hypot(ball.vx, ball.vy), minVy = sp * Math.sin(MIN_ELEV);
+  if (Math.abs(ball.vy) < minVy) {
+    var sy = ball.vy <= 0 ? -1 : 1, sx = ball.vx < 0 ? -1 : 1;
+    ball.vx = sx * Math.sqrt(Math.max(sp * sp - minVy * minVy, 0)); ball.vy = sy * minVy;
+  }
+}
+function clearBrick(k, b) {
+  delete bricks[k];
+  score += turn; combo++;
+  popups.push({ x: cellCenter(b.c, b.r).x, y: cellCenter(b.c, b.r).y, text: '+' + turn, t: 0, color: INK });
+  for (var i = 0; i < 6; i++) popups.push({ x: cellCenter(b.c, b.r).x, y: cellCenter(b.c, b.r).y, scrap: true, color: b.color,
+    vx: (rnd() - 0.5) * 260, vy: -120 - rnd() * 160, rot: rnd() * 6, t: 0 });
+}
+function stepBall(ball, dt) {
+  var dist = Math.hypot(ball.vx, ball.vy) * dt, n = Math.max(1, Math.ceil(dist / SUBSTEP)), sdt = dt / n;
+  for (var i = 0; i < n; i++) {
+    ball.x += ball.vx * sdt; ball.y += ball.vy * sdt;
+    if (ball.x - BALL_R < BOARD_L) { ball.x = BOARD_L + BALL_R; ball.vx = Math.abs(ball.vx); }
+    if (ball.x + BALL_R > BOARD_R) { ball.x = BOARD_R - BALL_R; ball.vx = -Math.abs(ball.vx); }
+    if (ball.y - BALL_R < BOARD_T) { ball.y = BOARD_T + BALL_R; ball.vy = Math.abs(ball.vy); }
+    var hit = brickHit(ball);
+    if (hit) {
+      ball.vx -= 2 * (ball.vx * hit.nx) * hit.nx; ball.vy -= 2 * (ball.vy * hit.ny) * hit.ny;
+      ball.x += hit.nx * (hit.pen + 0.5); ball.y += hit.ny * (hit.pen + 0.5);
+      minElev(ball);
+      var b = hit.b; b.hp--; b.flash = 1; b.tilt = (hit.nx !== 0 ? -hit.nx : (b.c % 2 ? 1 : -1)) * 0.12;
+      if (b.hp <= 0) clearBrick(key(b.c, b.r), b);
+      ball.hits++;
+    }
+    // pickups
+    var pc = Math.floor((ball.x - BOARD_L) / CELL), pr = Math.floor((ball.y - BOARD_T) / CELL), pk = key(pc, pr);
+    if (pickups[pk] && !ball.gotPickup) {
+      var cc = cellCenter(pc, pr);
+      if (Math.hypot(ball.x - cc.x, ball.y - cc.y) < CELL * 0.35) {
+        delete pickups[pk]; ballCount++; ball.gotPickup = true;
+        popups.push({ x: cc.x, y: cc.y, text: '+1 ball', t: 0, color: BLUE });
+      }
+    }
+    if (ball.y + BALL_R >= FLOOR_Y && ball.vy > 0) { ball.dead = true; return; }
+  }
+  ball.life += dt;
+  if (ball.life > 7 && !ball.fast) { ball.fast = true; ball.vx *= 1.8; ball.vy *= 1.8; }
+  if (ball.life > 18) ball.dead = true;
+}
+function update(dt) {
+  t += dt;
+  if (phase === 'firing') {
+    fireClock += dt;
+    while (toFire > 0 && fireClock >= 0) {
+      balls.push({ x: launcherX, y: FLOOR_Y - BALL_R - 2, vx: fireDir.x * BALL_SPEED, vy: fireDir.y * BALL_SPEED, life: 0, hits: 0 });
+      toFire--; fireClock -= FIRE_GAP;
+    }
+    for (var i = balls.length - 1; i >= 0; i--) {
+      var b = balls[i]; stepBall(b, dt);
+      if (b.dead) { if (firstReturnX === null) firstReturnX = Math.max(BOARD_L + 20, Math.min(BOARD_R - 20, b.x)); balls.splice(i, 1); returned++; }
+    }
+    if (toFire === 0 && balls.length === 0) {
+      if (firstReturnX !== null) launcherX = firstReturnX;
+      // row bonus: every row that is now empty of its bricks
+      phase = 'descend'; descendT = 0;
+    }
+  } else if (phase === 'descend') {
+    descendT += dt;
+    if (descendT > 0.35) {
+      shiftRows(); turn++;
+      var lost = false;
+      for (var k in bricks) if (bricks[k].r >= ROWS - 1) lost = true;
+      spawnRow();
+      if (turn > TURNS_IN_AD || lost) { phase = 'end'; endT = 0; }
+      else phase = 'aim';
+    }
+  } else if (phase === 'end') { endT += dt; }
+  for (var k2 in bricks) { var bb = bricks[k2]; bb.flash *= Math.pow(0.001, dt); bb.tilt *= Math.pow(0.0001, dt); }
+  for (var p = popups.length - 1; p >= 0; p--) {
+    var pp = popups[p]; pp.t += dt;
+    if (pp.scrap) { pp.x += pp.vx * dt; pp.y += pp.vy * dt; pp.vy += 700 * dt; pp.rot += 4 * dt; }
+    if (pp.t > (pp.scrap ? 0.9 : 1.1)) popups.splice(p, 1);
+  }
+  pulse += dt;
+}
+var endT = 0;
+
+// --- input: drag anywhere to aim from the launcher, release to fire ---
+function toDesign(e) {
+  var p = e.touches ? e.touches[0] : e;
+  return { x: (p.clientX - offX) / scale, y: (p.clientY - offY) / scale };
+}
+function aimFrom(pt) {
+  var dx = pt.x - launcherX, dy = pt.y - (FLOOR_Y - 8);
+  var len = Math.hypot(dx, dy); if (len < 1) return null;
+  var d = { x: dx / len, y: dy / len };
+  if (d.y > -Math.sin(MIN_ELEV)) { d.y = -Math.sin(MIN_ELEV); d.x = (d.x < 0 ? -1 : 1) * Math.cos(MIN_ELEV); }
+  return d;
+}
+function installHit(pt) {
+  return phase === 'end' ? (pt.y > 480 && pt.y < 550 && pt.x > 55 && pt.x < 335) : (pt.y < 64 && pt.x > W - 130);
+}
+function onDown(e) {
+  e.preventDefault(); var pt = toDesign(e);
+  if (installHit(pt)) { install(); return; }
+  if (phase === 'aim') { aiming = true; aimPt = pt; }
+  else if (phase === 'firing') fastForward = true;
+}
+function onMove(e) { e.preventDefault(); if (aiming) aimPt = toDesign(e); }
+function onUp(e) {
+  e.preventDefault(); fastForward = false;
+  if (aiming) { aiming = false; var d = aimFrom(aimPt); if (d && Math.hypot(aimPt.x - launcherX, aimPt.y - FLOOR_Y) > 30) fire(d); }
+}
+var fastForward = false;
+canvas.addEventListener('mousedown', onDown); canvas.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', onDown, { passive: false }); canvas.addEventListener('touchmove', onMove, { passive: false });
+window.addEventListener('touchend', onUp, { passive: false });
+function install() {
+  if (window.ExitApi && typeof window.ExitApi.exit === 'function') window.ExitApi.exit();
+  else window.open(STORE_URL, '_blank');
+}
+
+// --- drawing ---
+function paperButton(x, y, w, h, label, size, hot) {
+  ctx.fillStyle = SHADOW; ctx.fillRect(x + 3, y + 4, w, h);
+  ctx.fillStyle = hot ? YELLOW : CARD; ctx.fillRect(x, y, w, h);
+  ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeRect(x, y, w, h);
+  ctx.fillStyle = INK; ctx.font = 'bold ' + size + 'px Helvetica Neue, Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+}
+function draw() {
+  ctx.fillStyle = CREAM; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.save(); ctx.translate(offX, offY); ctx.scale(scale, scale);
+  // paper grain
+  ctx.fillStyle = 'rgba(42,36,32,0.035)';
+  for (var g = 0; g < 60; g++) { var gx = (g * 97) % W, gy = (g * 233) % H; ctx.fillRect(gx, gy, 14, 1); }
+  // hud
+  ctx.fillStyle = INK; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold 34px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText(String(score), 20, 52);
+  ctx.font = '12px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.fillText('SCORE', 21, 70);
+  ctx.textAlign = 'center'; ctx.font = '12px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.fillText('TURN', W / 2, 36);
+  ctx.font = 'bold 30px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.fillText(String(turn), W / 2, 66);
+  if (phase !== 'end') paperButton(W - 124, 22, 108, 36, 'Get the game', 13, true);
+  // board
+  ctx.fillStyle = SHADOW; ctx.fillRect(BOARD_L + 4, BOARD_T + 5, BOARD_R - BOARD_L, FLOOR_Y - BOARD_T);
+  ctx.fillStyle = CARD; ctx.fillRect(BOARD_L, BOARD_T, BOARD_R - BOARD_L, FLOOR_Y - BOARD_T);
+  ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeRect(BOARD_L, BOARD_T, BOARD_R - BOARD_L, FLOOR_Y - BOARD_T);
+  // danger line
+  ctx.setLineDash([8, 6]); ctx.strokeStyle = 'rgba(224,82,63,0.8)'; ctx.lineWidth = 2;
+  var dy = BOARD_T + (ROWS - 1) * CELL; ctx.beginPath(); ctx.moveTo(BOARD_L + 6, dy); ctx.lineTo(BOARD_R - 6, dy); ctx.stroke(); ctx.setLineDash([]);
+  // pickups
+  for (var pk in pickups) { var pp = pk.split(','), pc = cellCenter(+pp[0], +pp[1]);
+    drawStar(pc.x, pc.y + 2, 11 + Math.sin(pulse * 4) * 1.5); }
+  // bricks
+  for (var k in bricks) {
+    var b = bricks[k], c = cellCenter(b.c, b.r), s = CELL - 4;
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(b.tilt);
+    ctx.fillStyle = SHADOW; ctx.fillRect(-s / 2 + 3, -s / 2 + 4, s, s);
+    ctx.fillStyle = mix(b.color, WHITE, b.flash * 0.8); ctx.fillRect(-s / 2, -s / 2, s, s);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-s / 2 + 3, -s / 2 + 2.5); ctx.lineTo(s / 2 - 3, -s / 2 + 2.5); ctx.stroke();
+    ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeRect(-s / 2, -s / 2, s, s);
+    if (b.r >= ROWS - 2) { ctx.strokeStyle = 'rgba(224,82,63,' + (0.45 + 0.45 * Math.sin(pulse * 9)) + ')'; ctx.strokeRect(-s / 2 - 3, -s / 2 - 3, s + 6, s + 6); }
+    ctx.fillStyle = b.color === BLUE || b.color === RED ? WHITE : INK;
+    ctx.font = 'bold ' + Math.round(s * 0.5) + 'px Helvetica Neue, Helvetica, Arial, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.rotate(-0.07); ctx.fillText(String(b.hp), 0, 1);
+    ctx.restore();
+  }
+  // aim preview: dots along the line to the first brick or wall
+  if (aiming && aimPt) {
+    var d = aimFrom(aimPt);
+    if (d) {
+      var px = launcherX, py = FLOOR_Y - 8, dir = { x: d.x, y: d.y }, remaining = 620, dotPhase = (t * 160) % 16;
+      ctx.fillStyle = 'rgba(42,36,32,0.55)';
+      for (var bounce = 0; bounce < 3 && remaining > 0; bounce++) {
+        var tx = dir.x > 0 ? (BOARD_R - BALL_R - px) / dir.x : dir.x < 0 ? (BOARD_L + BALL_R - px) / dir.x : 1e9;
+        var ty = dir.y < 0 ? (BOARD_T + BALL_R - py) / dir.y : 1e9;
+        var tw = Math.min(tx, ty, remaining), tb = 1e9;
+        for (var m = 2; m < tw; m += 2) { var probe = { x: px + dir.x * m, y: py + dir.y * m, vx: dir.x, vy: dir.y }; if (brickHit(probe)) { tb = m; break; } }
+        var seg = Math.min(tw, tb);
+        for (var m2 = dotPhase; m2 < seg; m2 += 16) { ctx.beginPath(); ctx.arc(px + dir.x * m2, py + dir.y * m2, 2.4, 0, 7); ctx.fill(); }
+        if (tb < tw) { ctx.strokeStyle = RED; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(px + dir.x * tb, py + dir.y * tb, 8, 0, 7); ctx.stroke(); break; }
+        px += dir.x * seg; py += dir.y * seg; remaining -= seg;
+        if (tx < ty) dir.x = -dir.x; else dir.y = -dir.y;
+      }
+    }
+  }
+  // balls
+  for (var i = 0; i < balls.length; i++) { ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(balls[i].x, balls[i].y, BALL_R, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.beginPath(); ctx.arc(balls[i].x - 2, balls[i].y - 2, 2, 0, 7); ctx.fill(); }
+  // launcher
+  ctx.fillStyle = SHADOW; ctx.fillRect(launcherX - 22, FLOOR_Y + 2, 44, 8);
+  ctx.fillStyle = CARD; ctx.fillRect(launcherX - 24, FLOOR_Y - 2, 48, 8); ctx.lineWidth = 2.5; ctx.strokeStyle = INK; ctx.strokeRect(launcherX - 24, FLOOR_Y - 2, 48, 8);
+  if (phase === 'aim' || phase === 'firing') { ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(launcherX, FLOOR_Y - 10, BALL_R, 0, 7); ctx.fill(); }
+  ctx.fillStyle = INK; ctx.font = 'bold 18px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('x' + ballCount, launcherX, FLOOR_Y + 30);
+  // popups and scraps
+  for (var q = 0; q < popups.length; q++) {
+    var pq = popups[q];
+    if (pq.scrap) { ctx.save(); ctx.translate(pq.x, pq.y); ctx.rotate(pq.rot); ctx.globalAlpha = Math.max(0, 1 - pq.t / 0.9); ctx.fillStyle = pq.color; ctx.fillRect(-5, -4, 10, 8); ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.strokeRect(-5, -4, 10, 8); ctx.restore(); }
+    else { ctx.globalAlpha = Math.max(0, 1 - pq.t / 1.1); ctx.fillStyle = pq.color; ctx.font = 'bold 16px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.fillText(pq.text, pq.x, pq.y - pq.t * 40); ctx.globalAlpha = 1; }
+  }
+  // hint
+  if (phase === 'aim' && !aiming) {
+    var a = 0.55 + 0.35 * Math.sin(t * 3);
+    ctx.fillStyle = 'rgba(42,36,32,' + a + ')'; ctx.font = '15px Helvetica Neue, Helvetica, Arial, sans-serif';
+    ctx.fillText(turn === 1 ? 'Drag to aim, let go to fire' : (turn === 2 ? 'Grab the star for an extra ball' : 'Clear a row for a bonus'), W / 2, FLOOR_Y + 60);
+  }
+  if (phase === 'end') drawEnd();
+  ctx.restore();
+}
+function drawStar(x, y, r) {
+  ctx.save(); ctx.translate(x, y); ctx.beginPath();
+  for (var i = 0; i < 10; i++) { var rr = i % 2 ? r * 0.45 : r, a = -Math.PI / 2 + i * Math.PI / 5; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fillStyle = YELLOW; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = INK; ctx.stroke(); ctx.restore();
+}
+function drawEnd() {
+  var k = Math.min(1, endT / 0.35);
+  ctx.fillStyle = 'rgba(244,236,220,' + (0.85 * k) + ')'; ctx.fillRect(0, 0, W, H);
+  var y0 = 250 + (1 - k) * 40;
+  ctx.fillStyle = SHADOW; ctx.fillRect(43, y0 + 5, 304, 320);
+  ctx.fillStyle = CREAM; ctx.fillRect(40, y0, 304, 320); ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeRect(40, y0, 304, 320);
+  ctx.fillStyle = INK; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold 28px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.fillText(turn > TURNS_IN_AD ? 'Nice shooting.' : 'Run over.', W / 2, y0 + 50);
+  ctx.font = '16px Helvetica Neue, Helvetica, Arial, sans-serif';
+  ctx.fillText('Score ' + score + ' in ' + Math.min(turn - 1, TURNS_IN_AD) + ' turns.', W / 2, y0 + 85);
+  ctx.fillText('The real thing has perks every 5 turns,', W / 2, y0 + 125);
+  ctx.fillText('gold, bomb, steel and rubber bricks,', W / 2, y0 + 148);
+  ctx.fillText('a daily board and leaderboards.', W / 2, y0 + 171);
+  ctx.fillText('Free, one thumb, no sign-in.', W / 2, y0 + 205);
+  paperButton(55, y0 + 230, 280, 64, 'Get Ricochet Run', 22, true);
+}
+function mix(hex, hex2, k) {
+  function p(h) { return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)]; }
+  var a = p(hex), b = p(hex2); k = Math.max(0, Math.min(1, k));
+  return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * k) + ',' + Math.round(a[1] + (b[1] - a[1]) * k) + ',' + Math.round(a[2] + (b[2] - a[2]) * k) + ')';
+}
+
+// --- loop ---
+var last = null;
+function frame(now) {
+  if (last === null) last = now;
+  var dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt * (fastForward && phase === 'firing' ? 3 : 1));
+  draw();
+  requestAnimationFrame(frame);
+}
+startRun();
+requestAnimationFrame(frame);
+// Test hook: drive the sim without waiting on animation frames.
+window.__rr = { update: update, draw: draw, fire: fire, state: function () {
+  return { phase: phase, turn: turn, score: score, balls: balls.length, ballCount: ballCount,
+    bricks: Object.keys(bricks).length, pickups: Object.keys(pickups).length, launcherX: launcherX }; } };
+})();
+</script>
+</body>
+</html>
