@@ -29,6 +29,8 @@ var FLOOR_Y = BOARD_T + ROWS * CELL + 18;
 var BALL_R = 6, BALL_SPEED = 900, FIRE_GAP = 0.08, SUBSTEP = 4;
 var MIN_ELEV = 12 * Math.PI / 180;
 var TURNS_IN_AD = 4;   // turns of play before the install card
+// The app icon, inline so the file stays self-contained (96 px, rounded).
+var ICON = new Image(); ICON.src = 'data:image/png;base64,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';
 
 var canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
 var scale = 1, offX = 0, offY = 0;
@@ -200,7 +202,7 @@ function update(dt) {
   }
   pulse += dt;
 }
-var endT = 0;
+var endT = 0, endButtonY = 1e9;
 
 // --- input: drag anywhere to aim from the launcher, release to fire ---
 function toDesign(e) {
@@ -215,7 +217,7 @@ function aimFrom(pt) {
   return d;
 }
 function installHit(pt) {
-  return phase === 'end' ? (pt.y > 480 && pt.y < 550 && pt.x > 55 && pt.x < 335) : (pt.y < 64 && pt.x > W - 130);
+  return phase === 'end' ? (pt.y > endButtonY && pt.y < endButtonY + 64 && pt.x > W / 2 - 140 && pt.x < W / 2 + 140) : (pt.y < 64 && pt.x > W - 130);
 }
 function onDown(e) {
   e.preventDefault(); var pt = toDesign(e);
@@ -335,8 +337,9 @@ function drawEnd() {
   var k = Math.min(1, endT / 0.35);
   ctx.fillStyle = 'rgba(244,236,220,' + (0.85 * k) + ')'; ctx.fillRect(0, 0, W, H);
   var y0 = 250 + (1 - k) * 40;
-  ctx.fillStyle = SHADOW; ctx.fillRect(43, y0 + 5, 304, 320);
-  ctx.fillStyle = CREAM; ctx.fillRect(40, y0, 304, 320); ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeRect(40, y0, 304, 320);
+  var cx0 = W / 2 - 152;
+  ctx.fillStyle = SHADOW; ctx.fillRect(cx0 + 3, y0 + 5, 304, 346);
+  ctx.fillStyle = CREAM; ctx.fillRect(cx0, y0, 304, 346); ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeRect(cx0, y0, 304, 346);
   ctx.fillStyle = INK; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.font = 'bold 28px Helvetica Neue, Helvetica, Arial, sans-serif'; ctx.fillText(turn > TURNS_IN_AD ? 'Nice shooting.' : 'Run over.', W / 2, y0 + 50);
   ctx.font = '16px Helvetica Neue, Helvetica, Arial, sans-serif';
@@ -344,8 +347,16 @@ function drawEnd() {
   ctx.fillText('The real thing has perks every 5 turns,', W / 2, y0 + 125);
   ctx.fillText('gold, bomb, steel and rubber bricks,', W / 2, y0 + 148);
   ctx.fillText('a daily board and leaderboards.', W / 2, y0 + 171);
-  ctx.fillText('Free, one thumb, no sign-in.', W / 2, y0 + 205);
-  paperButton(55, y0 + 230, 280, 64, 'Get Ricochet Run', 22, true);
+  ctx.fillText('Oh. And fireballs.', W / 2, y0 + 198);
+  ctx.fillText('Free, one thumb, no sign-in.', W / 2, y0 + 232);
+  var bx = W / 2 - 140, by = y0 + 256; endButtonY = by;
+  paperButton(bx, by, 280, 64, '', 22, true);
+  if (ICON.complete && ICON.naturalWidth > 0) {
+    ctx.fillStyle = SHADOW; ctx.fillRect(bx + 14, by + 12 + 2, 44, 44);
+    ctx.drawImage(ICON, bx + 14, by + 10, 44, 44);
+  }
+  ctx.fillStyle = INK; ctx.font = 'bold 22px Helvetica Neue, Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('Get Ricochet Run', bx + 140 + 24, by + 33);
 }
 function mix(hex, hex2, k) {
   function p(h) { return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)]; }
